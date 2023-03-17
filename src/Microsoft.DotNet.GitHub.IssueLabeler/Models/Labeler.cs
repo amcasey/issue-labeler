@@ -83,6 +83,7 @@ namespace Microsoft.DotNet.GitHub.IssueLabeler
                         AreaOwnersDoc = _configuration.GetValue<string>($"{owner}:{repo}:area_owners_doc", null),
                         NewApiPrLabel = _configuration.GetValue<string>($"{owner}:{repo}:new_api_pr_label", null),
                         ApplyLinkedIssueAreaLabelToPr = _configuration.GetValue<bool>($"{owner}:{repo}:apply_linked_issue_area_label_to_pr", false),
+                        NoAreaDeterminedLabel = _configuration.GetValue<string>($"{owner}:{repo}:no_area_determined:label", null),
                         NoAreaDeterminedSkipComment = _configuration.GetValue<bool>($"{owner}:{repo}:no_area_determined:skip_comment", false),
 
                         DelayLabelingSeconds = _configuration.GetValue<int>($"{owner}:{repo}:delay_labeling_seconds", 0),
@@ -110,6 +111,7 @@ namespace Microsoft.DotNet.GitHub.IssueLabeler
             public string AreaOwnersDoc { get; init; }
             public string NewApiPrLabel { get; init; }
             public bool ApplyLinkedIssueAreaLabelToPr { get; init; }
+            public string NoAreaDeterminedLabel { get; init; }
             public bool NoAreaDeterminedSkipComment { get; init; }
 
             public int DelayLabelingSeconds { get; init; }
@@ -212,21 +214,29 @@ namespace Microsoft.DotNet.GitHub.IssueLabeler
             var iop = await _gitHubClientWrapper.GetIssue(owner, repo, number);
 
             var existingLabelList = iop?.Labels?.Where(x => !string.IsNullOrEmpty(x.Name)).Select(x => x.Name).ToList();
-            bool issueMissingAreaLabel = !existingLabelList?.Where(x => x.StartsWith("area-", StringComparison.OrdinalIgnoreCase)).Any() ?? true;
 
-            // update section
-            if (labels.Count > 0 || (foundArea && issueMissingAreaLabel))
+            // if there's no area- label, and there's also not a label used for when no area was determined
+            // then we need to take action for the missing area label
+            bool alreadyHasAreaLabel = existingLabelList?.Any(l => l.StartsWith("area-", StringComparison.OrdinalIgnoreCase)) ?? false;
+            bool alreadyHasNoAreaDeterminedLabel = options.NoAreaDeterminedLabel is not null && (existingLabelList?.Any(l => l.Equals(options.NoAreaDeterminedLabel, StringComparison.OrdinalIgnoreCase)) ?? false);
+            bool needsAreaLabel = !alreadyHasAreaLabel && !alreadyHasNoAreaDeterminedLabel;
+
+            // update the labels for the issue/pr
+            if (labels.Count > 0 || needsAreaLabel)
             {
-                //var issueUpdate = iop.ToUpdate();
-                var labelsToAdd = new List<string>();
+                var labelsToAdd = new List<string>(labels);
 
-                if (foundArea && issueMissingAreaLabel)
+                if (needsAreaLabel)
                 {
-                    // no area label yet
-                    labelsToAdd.Add(theFoundLabel);
+                    if (foundArea)
+                    {
+                        labelsToAdd.Add(theFoundLabel);
+                    }
+                    else if (options.NoAreaDeterminedLabel is not null)
+                    {
+                        labelsToAdd.Add(options.NoAreaDeterminedLabel);
+                    }
                 }
-
-                labelsToAdd.AddRange(labels);
 
                 if (options.CanUpdateLabels && labelsToAdd.Any())
                 {
@@ -251,8 +261,8 @@ namespace Microsoft.DotNet.GitHub.IssueLabeler
                     await _gitHubClientWrapper.CommentOn(owner, repo, iop.Number, newApiComment);
                 }
 
-                // if newlabels has no area-label and existing does not also. then comment
-                if (!foundArea && issueMissingAreaLabel && !options.NoAreaDeterminedSkipComment)
+                // if the issue/pr needed and area label and one was not applied, leave a comment (unless configured to skip)
+                if (needsAreaLabel && !foundArea && !options.NoAreaDeterminedSkipComment)
                 {
                     if (issueOrPr == GithubObjectType.Issue)
                     {
